@@ -541,4 +541,112 @@ config = {
   "model_basename": "encoder_decoder_model_"
 }
 
-train_model(config)
+
+# decode to produce target/output words
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+  sos_idx = tokenizer_tgt.token_to_id("[SOS]") # start of sentence
+  eos_idx = tokenizer_tgt.token_to_id("[EOS]") # end of sentence
+
+  # encode the source sentence 
+  encoder_output = model.encode(source, source_mask)
+
+  # create a tensor to hold decoded words
+  decoder_input = torch.empty(1,1).fill_(sos_idx).type_as(source).to(device)
+
+  while True:
+    # break if we reach max_len
+    if decoder_input.size(1) >= max_len:
+      break
+
+    # create a mask to prevent the decoder from attending to future words
+    decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+
+    # get the output of the decoder
+    out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+
+    # predict the probabilities of each word
+    prob = model.project(out[:, -1])
+
+    # get the word with the highest probability
+    _, next_word = torch.max(prob, dim=-1)
+
+    # append the word to the decoder input
+    decoder_input = torch.cat([decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1)
+
+    # break if we predict the end of sentence token
+    if next_word == eos_idx:
+      break
+
+  # convert the decoded words to tokens
+  return decoder_input.squeeze(0)
+
+
+
+def run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_state, writer, num_examples=1):
+  model.eval()
+  count = 0
+  
+  source_texts = []
+  expected = []
+  predicted = []
+
+  console_width = 80
+
+  with torch.no_grad():
+    for batch in val_dataloader:
+      count += 1
+      encoder_input = batch['encoder_input'].to(device)
+      encoder_mask = batch['encoder_mask'].to(device)
+
+      assert encoder_input.size(0) == 1, "Batch size must be 1 for validation"
+
+      # get the decoded tokens
+      model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
+
+      source_text = batch['src_text'][0]
+      target_text = batch['tgt_text'][0]
+
+      # convert the tokens to text
+      model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
+
+      source_texts.append(source_text)
+      expected.append(target_text)
+      predicted.append(model_out_text)
+
+      print_msg('-' * console_width)
+      print_msg(f"Source: {source_text}") 
+      print_msg(f"Expected: {target_text}") 
+      print_msg(f"Predicted: {model_out_text}")
+
+      if count >= num_examples:
+        break
+
+
+def predict_model(config):
+  device = "cuda" if torch.cuda.is_available() else "mps" if torch.has_mps or torch.backends.mps.is_available() else "cpu"
+  print("Using device:", device)
+  if (device == 'cuda'):
+    print(f"Device name: {torch.cuda.get_device_name(device.index)}")
+    print(f"Device memory: {torch.cuda.get_device_properties(device.index).total_memory / 1024 ** 3} GB")
+  else:
+    print("Please ensure you're in a GPU enabled Colab Notebook instance.")
+  device = torch.device(device)
+  train_dataloader, val_dataloader, tokenizer_src, tokenizer_tgt = get_ds(config)
+  model = get_model(config, tokenizer_src.get_vocab_size(), tokenizer_tgt.get_vocab_size()).to(device)
+  optimizer = torch.optim.Adam(model.parameters(), lr=config['lr'], eps=1e-9)
+
+  model_filename = "/Users/mitultiwari/projects/course/LLME-The-Fundamentals-Cohort-2/models/opus_books_weights/encoder_decoder_model_09.pt"
+  checkpoint = torch.load(model_filename)
+  model.load_state_dict(checkpoint['model_state_dict'])
+  optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+  # run inference on part of validation dataset
+  run_validation(model, val_dataloader, tokenizer_src, tokenizer_tgt, config['seq_len'], device, lambda msg: print(msg), 0, None, num_examples=10)
+
+
+if __name__ == '__main__':
+  # to train model 
+  # train_model(config)
+  predict_model(config)
+  
+
